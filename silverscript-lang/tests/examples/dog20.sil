@@ -10,12 +10,12 @@ contract Dog20(byte[32] genesisPk, int genesisAmount, byte genesisIdentifierType
 
     function checkSigs(State[] prevStates, sig[] sigs, byte[] witnesses) {
         for(i, 0, prevStates.length, maxCovIns) {
-            if(identifierType == IDENTIFIER_PUBKEY){
+            if(prevStates[i].ownerIdentifier == IDENTIFIER_PUBKEY){
                 require(checkSig(sigs[i], prevStates[i].ownerIdentifier));
-            } else if(identifierType == IDENTIFIER_SCRIPT_HASH){
+            } else if(prevStates[i].ownerIdentifier == IDENTIFIER_SCRIPT_HASH){
                 byte[] spk = new ScriptPubKeyP2SH(prevStates[i].ownerIdentifier);
                 require(tx.inputs[witnesses[i]].scriptPubKey == spk);
-            } else if(identifierType == IDENTIFIER_COVENANT_ID){
+            } else if(prevStates[i].ownerIdentifier == IDENTIFIER_COVENANT_ID){
                 require(OpInputCovenantId(witnesses[i]) == prevStates[i].ownerIdentifier);
             } else {
                 require(false);
