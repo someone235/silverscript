@@ -205,3 +205,16 @@ fn rejects_invalid_for_arities() {
     "#;
     assert!(parse_source_file(too_few_args).is_err());
 }
+
+#[test]
+fn parses_identifiers_starting_with_underscore() {
+    let input = r#"
+        contract Decls() {
+            function __covenant_policy_transfer() {
+                require(true);
+            }
+        }
+    "#;
+
+    assert!(parse_source_file(input).is_ok());
+}

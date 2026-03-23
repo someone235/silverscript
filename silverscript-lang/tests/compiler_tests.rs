@@ -4,7 +4,7 @@ use kaspa_consensus_core::hashing::sighash::SigHashReusedValuesUnsync;
 use kaspa_consensus_core::subnets::SubnetworkId;
 use kaspa_consensus_core::tx::{
     CovenantBinding, PopulatedTransaction, ScriptPublicKey, Transaction, TransactionId, TransactionInput, TransactionOutpoint,
-    TransactionOutput, UtxoEntry, VerifiableTransaction,
+    TransactionOutput, TxInputMass, UtxoEntry, VerifiableTransaction,
 };
 use kaspa_txscript::caches::Cache;
 use kaspa_txscript::covenants::CovenantsContext;
@@ -40,7 +40,7 @@ fn run_script_with_tx(
         previous_outpoint: TransactionOutpoint { transaction_id: TransactionId::from_bytes([0u8; 32]), index: 0 },
         signature_script: sigscript,
         sequence,
-        sig_op_count: 0,
+                mass: TxInputMass::ComputeMass(0),
     };
     let output = TransactionOutput { value: 1000, script_public_key: ScriptPublicKey::new(0, script.clone().into()), covenant: None };
     let tx = Transaction::new(1, vec![input.clone()], vec![output.clone()], lock_time, Default::default(), 0, vec![]);
@@ -53,7 +53,7 @@ fn run_script_with_tx(
         0,
         &utxo_entry,
         EngineCtx::new(&sig_cache).with_reused(&reused_values),
-        EngineFlags { covenants_enabled: true },
+        EngineFlags { covenants_enabled: true, mass_per_sig_op: 0 },
     );
     vm.execute()
 }
@@ -74,7 +74,7 @@ fn run_script_with_sigscript(script: Vec<u8>, sigscript: Vec<u8>) -> Result<(), 
         previous_outpoint: TransactionOutpoint { transaction_id: TransactionId::from_bytes([1u8; 32]), index: 0 },
         signature_script: sigscript,
         sequence: 0,
-        sig_op_count: 0,
+                mass: TxInputMass::ComputeMass(0),
     };
     let output = TransactionOutput { value: 1000, script_public_key: ScriptPublicKey::new(0, script.clone().into()), covenant: None };
     let tx = Transaction::new(1, vec![input.clone()], vec![output.clone()], 0, Default::default(), 0, vec![]);
@@ -87,7 +87,7 @@ fn run_script_with_sigscript(script: Vec<u8>, sigscript: Vec<u8>) -> Result<(), 
         0,
         &utxo_entry,
         EngineCtx::new(&sig_cache).with_reused(&reused_values),
-        EngineFlags { covenants_enabled: true },
+        EngineFlags { covenants_enabled: true, mass_per_sig_op: 0 },
     );
     vm.execute()
 }
@@ -101,7 +101,7 @@ fn test_input(index: u32, signature_script: Vec<u8>) -> TransactionInput {
         previous_outpoint: TransactionOutpoint { transaction_id: TransactionId::from_bytes([index as u8; 32]), index },
         signature_script,
         sequence: 0,
-        sig_op_count: 0,
+                mass: TxInputMass::ComputeMass(0),
     }
 }
 
@@ -118,7 +118,7 @@ fn execute_input(tx: Transaction, entries: Vec<UtxoEntry>, input_idx: usize) -> 
         input_idx,
         utxo_entry,
         EngineCtx::new(&sig_cache).with_reused(&reused_values),
-        EngineFlags { covenants_enabled: true },
+        EngineFlags { covenants_enabled: true, mass_per_sig_op: 0 },
     );
     vm.execute()
 }
@@ -737,6 +737,37 @@ fn rejects_entrypoint_return_by_default() {
 
     let err = compile_contract(source, &[], CompileOptions::default()).expect_err("entrypoint return should be disallowed by default");
     assert!(err.to_string().contains("entrypoint return requires allow_entrypoint_return=true"));
+}
+
+#[test]
+fn rejects_double_underscore_variables_by_default() {
+    let source = r#"
+        contract ReservedVars() {
+            entrypoint function main() {
+                int __tmp = 1;
+                require(__tmp == 1);
+            }
+        }
+    "#;
+
+    let err = compile_contract(source, &[], CompileOptions::default())
+        .expect_err("double underscore variable names should be disallowed by default");
+    assert!(err.to_string().contains("variables starting with '__' are reserved"));
+}
+
+#[test]
+fn allows_double_underscore_variables_when_enabled() {
+    let source = r#"
+        contract ReservedVars() {
+            entrypoint function main() {
+                int __tmp = 1;
+                require(__tmp == 1);
+            }
+        }
+    "#;
+
+    let options = CompileOptions { allow_double_underscore_variables: true, ..CompileOptions::default() };
+    compile_contract(source, &[], options).expect("compile should allow __-prefixed variable names when enabled");
 }
 
 #[test]
@@ -3111,8 +3142,14 @@ fn run_script_with_tx_and_covenants(
     }
 
     let utxo_entry = populated.utxo(0).expect("utxo entry for input 0");
-    let mut vm =
-        TxScriptEngine::from_transaction_input(&populated, &tx.inputs[0], 0, utxo_entry, ctx, EngineFlags { covenants_enabled: true });
+    let mut vm = TxScriptEngine::from_transaction_input(
+        &populated,
+        &tx.inputs[0],
+        0,
+        utxo_entry,
+        ctx,
+        EngineFlags { covenants_enabled: true, mass_per_sig_op: 0 },
+    );
     vm.execute()
 }
 
@@ -3122,7 +3159,7 @@ fn build_basic_opcode_tx(sigscript: Vec<u8>) -> (Transaction, Vec<UtxoEntry>) {
         previous_outpoint: TransactionOutpoint { transaction_id: outpoint_txid, index: 7 },
         signature_script: sigscript,
         sequence: u64::from_le_bytes(*b"sequence"),
-        sig_op_count: 0,
+                mass: TxInputMass::ComputeMass(0),
     };
 
     let output0_spk = ScriptPublicKey::new(0, b"outspk".to_vec().into());

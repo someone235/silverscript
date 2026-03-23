@@ -5,7 +5,7 @@ use std::process::Command;
 use kaspa_consensus_core::hashing::sighash::SigHashReusedValuesUnsync;
 use kaspa_consensus_core::tx::{
     PopulatedTransaction, ScriptPublicKey, Transaction, TransactionId, TransactionInput, TransactionOutpoint, TransactionOutput,
-    UtxoEntry,
+    TxInputMass, UtxoEntry,
 };
 use kaspa_txscript::caches::Cache;
 use kaspa_txscript::script_builder::ScriptBuilder;
@@ -51,7 +51,7 @@ fn run_script_with_selector(script: Vec<u8>, selector: Option<i64>) -> Result<()
         previous_outpoint: TransactionOutpoint { transaction_id: TransactionId::from_bytes([1u8; 32]), index: 0 },
         signature_script: sigscript,
         sequence: 0,
-        sig_op_count: 0,
+                mass: TxInputMass::ComputeMass(0),
     };
     let output = TransactionOutput { value: 1000, script_public_key: ScriptPublicKey::new(0, script.clone().into()), covenant: None };
     let tx = Transaction::new(1, vec![input.clone()], vec![output.clone()], 0, Default::default(), 0, vec![]);
@@ -64,7 +64,7 @@ fn run_script_with_selector(script: Vec<u8>, selector: Option<i64>) -> Result<()
         0,
         &utxo_entry,
         EngineCtx::new(&sig_cache).with_reused(&reused_values),
-        EngineFlags { covenants_enabled: true },
+        EngineFlags { covenants_enabled: true, mass_per_sig_op: 0 },
     );
     vm.execute()
 }
@@ -161,4 +161,34 @@ fn silverc_ast_only_writes_file_with_output_flag() {
     let ast_json = fs::read_to_string(&out_path).expect("read ast output");
     let ast: ContractAst<'static> = serde_json::from_str(&ast_json).expect("parse ast json");
     assert_eq!(ast.name, "Basic");
+}
+
+#[test]
+fn silverc_flag_allows_double_underscore_variables() {
+    let dir = temp_dir("double_underscore_flag");
+    let src_path = dir.join("reserved_vars.sil");
+    let out_path = dir.join("reserved_vars.json");
+
+    let source = r#"
+        contract ReservedVars() {
+            entrypoint function main() {
+                int __tmp = 1;
+                require(__tmp == 1);
+            }
+        }
+    "#;
+    fs::write(&src_path, source).expect("write source");
+
+    let failed_output = silverc().arg(src_path.to_str().unwrap()).output().expect("run silverc without flag");
+    assert!(!failed_output.status.success());
+
+    let status = silverc()
+        .arg(src_path.to_str().unwrap())
+        .arg("--allow-double-underscore-variables")
+        .arg("-o")
+        .arg(out_path.to_str().unwrap())
+        .status()
+        .expect("run silverc with flag");
+    assert!(status.success());
+    assert!(out_path.exists());
 }

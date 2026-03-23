@@ -5,7 +5,7 @@ use kaspa_consensus_core::Hash;
 use kaspa_consensus_core::hashing::sighash::SigHashReusedValuesUnsync;
 use kaspa_consensus_core::tx::{
     PopulatedTransaction, ScriptPublicKey, Transaction, TransactionId, TransactionInput, TransactionOutpoint, TransactionOutput,
-    UtxoEntry, VerifiableTransaction,
+    TxInputMass, UtxoEntry, VerifiableTransaction,
 };
 use kaspa_txscript::caches::Cache;
 use kaspa_txscript::covenants::CovenantsContext;
@@ -76,7 +76,7 @@ where
     let reused_values = SigHashReusedValuesUnsync::new();
     let ctx = EngineCtx::new(&sig_cache).with_reused(&reused_values);
 
-    let flags = EngineFlags { covenants_enabled: true };
+    let flags = EngineFlags { covenants_enabled: true, mass_per_sig_op: 0 };
     let engine = debugger_session::session::DebugEngine::new(ctx, flags);
 
     let entry = compiled
@@ -1078,7 +1078,7 @@ contract CovLocal() {
         previous_outpoint: TransactionOutpoint { transaction_id: TransactionId::from_bytes([0x44u8; 32]), index: 0 },
         signature_script: sigscript.clone(),
         sequence: 0,
-        sig_op_count: 0,
+            mass: TxInputMass::ComputeMass(0),
     };
     let output = TransactionOutput { value: 1000, script_public_key: ScriptPublicKey::new(0, vec![OpTrue].into()), covenant: None };
     let tx = Transaction::new(1, vec![input], vec![output], 0, Default::default(), 0, vec![]);
@@ -1100,7 +1100,7 @@ contract CovLocal() {
         0,
         utxo_ref,
         ctx,
-        EngineFlags { covenants_enabled: true },
+        EngineFlags { covenants_enabled: true, mass_per_sig_op: 0 },
     );
 
     let shadow_ctx =
@@ -1143,7 +1143,7 @@ contract CovEval() {
         previous_outpoint: TransactionOutpoint { transaction_id: TransactionId::from_bytes([0x44u8; 32]), index: 0 },
         signature_script: sigscript.clone(),
         sequence: 0,
-        sig_op_count: 0,
+        mass: TxInputMass::ComputeMass(0),
     };
     let output = TransactionOutput { value: 1000, script_public_key: ScriptPublicKey::new(0, vec![OpTrue].into()), covenant: None };
     let tx = Transaction::new(1, vec![input], vec![output], 0, Default::default(), 0, vec![]);
@@ -1165,7 +1165,7 @@ contract CovEval() {
         0,
         utxo_ref,
         ctx,
-        EngineFlags { covenants_enabled: true },
+        EngineFlags { covenants_enabled: true, mass_per_sig_op: 0 },
     );
 
     let shadow_ctx =

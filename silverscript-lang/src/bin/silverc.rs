@@ -35,6 +35,9 @@ struct Cli {
     /// Parse source and emit AST JSON without compiling
     #[arg(long = "ast-only")]
     ast_only: bool,
+    /// Allow variable names that start with '__'
+    #[arg(long = "allow-double-underscore-variables")]
+    allow_double_underscore_variables: bool,
 }
 
 fn main() {
@@ -77,8 +80,10 @@ fn run() -> Result<(), String> {
         Vec::new()
     };
 
-    let compiled =
-        compile_contract(&source, &constructor_args, CompileOptions::default()).map_err(|err| format!("compile error: {err}"))?;
+    let compile_options =
+        CompileOptions { allow_double_underscore_variables: cli.allow_double_underscore_variables, ..CompileOptions::default() };
+
+    let compiled = compile_contract(&source, &constructor_args, compile_options).map_err(|err| format!("compile error: {err}"))?;
 
     let json = serde_json::to_string_pretty(&compiled).map_err(|err| format!("failed to serialize output: {err}"))?;
     let target = resolve_output_target(&cli, &cli.src, false);

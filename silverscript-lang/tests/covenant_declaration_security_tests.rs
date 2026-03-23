@@ -4,7 +4,7 @@ use kaspa_consensus_core::hashing::sighash::calc_schnorr_signature_hash;
 use kaspa_consensus_core::hashing::sighash_type::SIG_HASH_ALL;
 use kaspa_consensus_core::tx::{
     CovenantBinding, MutableTransaction, PopulatedTransaction, ScriptPublicKey, Transaction, TransactionId, TransactionInput,
-    TransactionOutpoint, TransactionOutput, UtxoEntry, VerifiableTransaction,
+    TransactionOutpoint, TransactionOutput, TxInputMass, UtxoEntry, VerifiableTransaction,
 };
 use kaspa_txscript::caches::Cache;
 use kaspa_txscript::covenants::CovenantsContext;
@@ -232,7 +232,7 @@ fn tx_input(index: u32, signature_script: Vec<u8>) -> TransactionInput {
         previous_outpoint: TransactionOutpoint { transaction_id: TransactionId::from_bytes([index as u8 + 1; 32]), index },
         signature_script,
         sequence: 0,
-        sig_op_count: 0,
+        mass: TxInputMass::ComputeMass(0),
     }
 }
 
@@ -241,7 +241,7 @@ fn tx_input_with_sigops(index: u32, signature_script: Vec<u8>, sig_op_count: u8)
         previous_outpoint: TransactionOutpoint { transaction_id: TransactionId::from_bytes([index as u8 + 1; 32]), index },
         signature_script,
         sequence: 0,
-        sig_op_count,
+        mass: TxInputMass::SigopCount(sig_op_count),
     }
 }
 
@@ -283,7 +283,7 @@ fn execute_input_with_covenants(tx: Transaction, entries: Vec<UtxoEntry>, input_
         input_idx,
         utxo,
         EngineCtx::new(&sig_cache).with_reused(&reused_values).with_covenants_ctx(&cov_ctx),
-        EngineFlags { covenants_enabled: true },
+        EngineFlags { covenants_enabled: true, mass_per_sig_op: 0 },
     );
     vm.execute()
 }
@@ -827,7 +827,7 @@ fn dog20_can_split_then_merge_tokens_with_two_way_fanout() {
             previous_outpoint: TransactionOutpoint { transaction_id: handoff_tx.id(), index: 0 },
             signature_script: vec![],
             sequence: 0,
-            sig_op_count: 1,
+                        mass: TxInputMass::ComputeMass(0),
         }],
         split_outputs.clone(),
         0,
@@ -852,7 +852,7 @@ fn dog20_can_split_then_merge_tokens_with_two_way_fanout() {
             previous_outpoint: TransactionOutpoint { transaction_id: handoff_tx.id(), index: 0 },
             signature_script: split_sigscript,
             sequence: 0,
-            sig_op_count: 1,
+                        mass: TxInputMass::ComputeMass(0),
         }],
         split_outputs,
         0,
@@ -880,13 +880,13 @@ fn dog20_can_split_then_merge_tokens_with_two_way_fanout() {
                 previous_outpoint: TransactionOutpoint { transaction_id: split_tx.id(), index: 0 },
                 signature_script: vec![],
                 sequence: 0,
-                sig_op_count: 2,
+                                mass: TxInputMass::ComputeMass(0),
             },
             TransactionInput {
                 previous_outpoint: TransactionOutpoint { transaction_id: split_tx.id(), index: 1 },
                 signature_script: vec![],
                 sequence: 0,
-                sig_op_count: 0,
+                                mass: TxInputMass::ComputeMass(0),
             },
         ],
         merge_outputs.clone(),
@@ -915,13 +915,13 @@ fn dog20_can_split_then_merge_tokens_with_two_way_fanout() {
                 previous_outpoint: TransactionOutpoint { transaction_id: split_tx.id(), index: 0 },
                 signature_script: merge_leader_sigscript,
                 sequence: 0,
-                sig_op_count: 2,
+                                mass: TxInputMass::ComputeMass(0),
             },
             TransactionInput {
                 previous_outpoint: TransactionOutpoint { transaction_id: split_tx.id(), index: 1 },
                 signature_script: merge_delegate_sigscript,
                 sequence: 0,
-                sig_op_count: 0,
+                                mass: TxInputMass::ComputeMass(0),
             },
         ],
         merge_outputs,
@@ -1010,7 +1010,7 @@ fn dog20_rejects_merge_when_one_signature_is_wrong() {
             previous_outpoint: TransactionOutpoint { transaction_id: handoff_tx.id(), index: 0 },
             signature_script: vec![],
             sequence: 0,
-            sig_op_count: 1,
+                        mass: TxInputMass::ComputeMass(0),
         }],
         split_outputs.clone(),
         0,
@@ -1035,7 +1035,7 @@ fn dog20_rejects_merge_when_one_signature_is_wrong() {
             previous_outpoint: TransactionOutpoint { transaction_id: handoff_tx.id(), index: 0 },
             signature_script: split_sigscript,
             sequence: 0,
-            sig_op_count: 1,
+                        mass: TxInputMass::ComputeMass(0),
         }],
         split_outputs,
         0,
@@ -1062,13 +1062,13 @@ fn dog20_rejects_merge_when_one_signature_is_wrong() {
                 previous_outpoint: TransactionOutpoint { transaction_id: split_tx.id(), index: 0 },
                 signature_script: vec![],
                 sequence: 0,
-                sig_op_count: 2,
+                                mass: TxInputMass::ComputeMass(0),
             },
             TransactionInput {
                 previous_outpoint: TransactionOutpoint { transaction_id: split_tx.id(), index: 1 },
                 signature_script: vec![],
                 sequence: 0,
-                sig_op_count: 0,
+                                mass: TxInputMass::ComputeMass(0),
             },
         ],
         merge_outputs.clone(),
@@ -1097,13 +1097,13 @@ fn dog20_rejects_merge_when_one_signature_is_wrong() {
                 previous_outpoint: TransactionOutpoint { transaction_id: split_tx.id(), index: 0 },
                 signature_script: merge_leader_sigscript,
                 sequence: 0,
-                sig_op_count: 2,
+                                mass: TxInputMass::ComputeMass(0),
             },
             TransactionInput {
                 previous_outpoint: TransactionOutpoint { transaction_id: split_tx.id(), index: 1 },
                 signature_script: merge_delegate_sigscript,
                 sequence: 0,
-                sig_op_count: 0,
+                                mass: TxInputMass::ComputeMass(0),
             },
         ],
         merge_outputs,
@@ -1189,7 +1189,7 @@ fn dog20_rejects_split_when_amounts_do_not_match() {
             previous_outpoint: TransactionOutpoint { transaction_id: handoff_tx.id(), index: 0 },
             signature_script: vec![],
             sequence: 0,
-            sig_op_count: 1,
+                        mass: TxInputMass::ComputeMass(0),
         }],
         split_outputs.clone(),
         0,
@@ -1214,7 +1214,7 @@ fn dog20_rejects_split_when_amounts_do_not_match() {
             previous_outpoint: TransactionOutpoint { transaction_id: handoff_tx.id(), index: 0 },
             signature_script: split_sigscript,
             sequence: 0,
-            sig_op_count: 1,
+                        mass: TxInputMass::ComputeMass(0),
         }],
         split_outputs,
         0,

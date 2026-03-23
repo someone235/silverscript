@@ -15,7 +15,7 @@ use kaspa_consensus_core::Hash;
 use kaspa_consensus_core::hashing::sighash::SigHashReusedValuesUnsync;
 use kaspa_consensus_core::tx::{
     CovenantBinding, PopulatedTransaction, ScriptPublicKey, Transaction, TransactionId, TransactionInput, TransactionOutpoint,
-    TransactionOutput, UtxoEntry, VerifiableTransaction,
+    TransactionOutput, TxInputMass, UtxoEntry, VerifiableTransaction,
 };
 use kaspa_txscript::caches::Cache;
 use kaspa_txscript::covenants::CovenantsContext;
@@ -46,19 +46,23 @@ struct CliArgs {
     raw_ctor_args: Vec<String>,
     #[arg(long = "arg", short = 'a')]
     raw_args: Vec<String>,
+    #[arg(long = "allow-double-underscore-variables")]
+    allow_double_underscore_variables: bool,
 }
 
 fn compile_script_for_ctor_args(
     source: &str,
     parsed_contract: &ContractAst<'_>,
     raw_ctor_args: &[String],
+    allow_double_underscore_variables: bool,
     cache: &mut HashMap<Vec<String>, Vec<u8>>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     if let Some(script) = cache.get(raw_ctor_args) {
         return Ok(script.clone());
     }
     let ctor_args = parse_ctor_args(parsed_contract, raw_ctor_args)?;
-    let compiled = compile_contract(source, &ctor_args, CompileOptions::default())?;
+    let compile_options = CompileOptions { allow_double_underscore_variables, ..CompileOptions::default() };
+    let compiled = compile_contract(source, &ctor_args, compile_options)?;
     cache.insert(raw_ctor_args.to_vec(), compiled.script.clone());
     Ok(compiled.script)
 }
@@ -340,7 +344,11 @@ fn run_repl(session: &mut DebugSession<'_, '_>) -> Result<(), Box<dyn std::error
     Ok(())
 }
 
-fn run_all_tests(test_file: &str, script_path: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+fn run_all_tests(
+    test_file: &str,
+    script_path: Option<&str>,
+    allow_double_underscore_variables: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     use debugger_session::test_runner::read_contract_test_file;
     let test_file_path = Path::new(test_file);
     let parsed = read_contract_test_file(test_file_path)?;
@@ -349,11 +357,15 @@ fn run_all_tests(test_file: &str, script_path: Option<&str>) -> Result<(), Box<d
     let mut passed = 0;
     let mut failed = 0;
     for name in &test_names {
-        let mut args = vec!["--run", "--test-file", test_file, "--test-name", name];
+        let mut command = std::process::Command::new(std::env::current_exe()?);
+        command.args(["--run", "--test-file", test_file, "--test-name", name]);
         if let Some(path) = script_path {
-            args.push(path);
+            command.arg(path);
         }
-        let result = std::process::Command::new(std::env::current_exe()?).args(&args).output()?;
+        if allow_double_underscore_variables {
+            command.arg("--allow-double-underscore-variables");
+        }
+        let result = command.output()?;
         let stdout = String::from_utf8_lossy(&result.stdout);
         let stderr = String::from_utf8_lossy(&result.stderr);
         println!("  RUN   {name}");
@@ -405,7 +417,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let test_file = resolve_test_file_path(cli.test_file.as_deref(), cli.script_path.as_deref(), "run-all")?
             .ok_or("--run-all requires SCRIPT_PATH or --test-file")?;
         let test_file = test_file.to_string_lossy().into_owned();
-        return run_all_tests(&test_file, cli.script_path.as_deref());
+        return run_all_tests(&test_file, cli.script_path.as_deref(), cli.allow_double_underscore_variables);
     }
 
     // Resolve source, ctor args, function, call args, and tx from test file or CLI flags
@@ -436,7 +448,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let parsed_contract = parse_contract_ast(&source)?;
 
     let ctor_args = parse_ctor_args(&parsed_contract, &raw_ctor_args)?;
-    let compile_opts = CompileOptions { record_debug_infos: true, ..Default::default() };
+    let compile_opts = CompileOptions {
+        record_debug_infos: true,
+        allow_double_underscore_variables: cli.allow_double_underscore_variables,
+        ..Default::default()
+    };
     let compiled = compile_contract(&source, &ctor_args, compile_opts)?;
     let debug_info = compiled.debug_info.clone();
     let mut ctor_script_cache = HashMap::<Vec<String>, Vec<u8>>::new();
@@ -496,7 +512,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let input_ctor_raw = input.constructor_args.clone().unwrap_or_else(|| raw_ctor_args.clone());
         let redeem_script = if input.utxo_script_hex.is_none() {
-            Some(compile_script_for_ctor_args(&source, &parsed_contract, &input_ctor_raw, &mut ctor_script_cache)?)
+            Some(compile_script_for_ctor_args(
+                &source,
+                &parsed_contract,
+                &input_ctor_raw,
+                cli.allow_double_underscore_variables,
+                &mut ctor_script_cache,
+            )?)
         } else {
             None
         };
@@ -524,7 +546,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             previous_outpoint: TransactionOutpoint { transaction_id: prev_txid, index: input.prev_index },
             signature_script,
             sequence: input.sequence,
-            sig_op_count: input.sig_op_count,
+            mass: if TxInputMass::has_sig_op_count_field(tx.version) {
+                TxInputMass::SigopCount(input.sig_op_count)
+            } else {
+                TxInputMass::ComputeMass(0)
+            },
         });
         utxo_specs.push((input.utxo_value, utxo_spk, covenant_id));
     }
@@ -539,7 +565,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ScriptPublicKey::new(0, p2pk_script.into())
         } else {
             let output_ctor_raw = output.constructor_args.clone().unwrap_or_else(|| raw_ctor_args.clone());
-            let output_script = compile_script_for_ctor_args(&source, &parsed_contract, &output_ctor_raw, &mut ctor_script_cache)?;
+            let output_script = compile_script_for_ctor_args(
+                &source,
+                &parsed_contract,
+                &output_ctor_raw,
+                cli.allow_double_underscore_variables,
+                &mut ctor_script_cache,
+            )?;
             pay_to_script_hash_script(&output_script)
         };
 
@@ -559,7 +591,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let sig_cache = Cache::new(10_000);
     let reused_values = SigHashReusedValuesUnsync::new();
-    let flags = EngineFlags { covenants_enabled: true };
+    let flags = EngineFlags { covenants_enabled: true, mass_per_sig_op: 0 };
 
     let utxos = utxo_specs
         .into_iter()

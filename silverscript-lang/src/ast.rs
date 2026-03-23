@@ -2322,9 +2322,5 @@ fn parse_identifier<'i>(pair: Pair<'i, Rule>) -> Result<Identifier<'i>, Compiler
     let span = Span::from(pair.as_span());
     let value = pair.as_str().to_string();
 
-    if value.starts_with("__") {
-        return Err(CompilerError::Unsupported("identifiers starting with '__' are reserved".to_string()));
-    }
-
     Ok(Identifier { name: value, span })
 }

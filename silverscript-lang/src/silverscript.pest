@@ -177,7 +177,7 @@ NullaryOp = {
     | "tx.locktime"
 }
 
-Identifier = @{ !keyword_boundary ~ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_")* }
+Identifier = @{ !keyword_boundary ~ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 
 keyword_boundary = { keyword ~ !(ASCII_ALPHANUMERIC | "_") }
 

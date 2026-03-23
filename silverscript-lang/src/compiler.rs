@@ -9,6 +9,7 @@ use crate::ast::{
     ArrayDim, BinaryOp, ContractAst, ContractFieldAst, Expr, ExprKind, FunctionAst, IntrospectionKind, NullaryOp, SplitPart,
     StateBindingAst, StateFieldExpr, Statement, TimeVar, TypeBase, TypeRef, UnaryOp, UnarySuffixKind, parse_contract_ast,
     parse_type_ref,
+    visit::{AstVisitorMut, NameKind, visit_contract_mut},
 };
 use crate::debug_info::{DebugInfo, RuntimeBinding, SourceSpan};
 pub use crate::errors::{CompilerError, ErrorSpan};
@@ -50,6 +51,50 @@ fn generated_covenant_delegate_entrypoint_name(function_name: &str) -> String {
 pub struct CompileOptions {
     pub allow_entrypoint_return: bool,
     pub record_debug_infos: bool,
+    pub allow_double_underscore_variables: bool,
+}
+
+struct ReservedVariableNameValidator {
+    has_reserved_name: bool,
+}
+
+impl<'i> AstVisitorMut<'i> for ReservedVariableNameValidator {
+    fn visit_name(&mut self, name: &mut String, kind: NameKind) {
+        if self.has_reserved_name {
+            return;
+        }
+
+        let is_variable_name = matches!(
+            kind,
+            NameKind::ContractField
+                | NameKind::Constant
+                | NameKind::Parameter
+                | NameKind::LocalBinding
+                | NameKind::LoopBinding
+                | NameKind::StateBinding
+        );
+
+        if is_variable_name && name.starts_with("__") {
+            self.has_reserved_name = true;
+        }
+    }
+}
+
+fn validate_reserved_variable_names<'i>(contract: &ContractAst<'i>, options: CompileOptions) -> Result<(), CompilerError> {
+    if options.allow_double_underscore_variables {
+        return Ok(());
+    }
+
+    let mut cloned = contract.clone();
+    let mut validator = ReservedVariableNameValidator { has_reserved_name: false };
+    visit_contract_mut(&mut validator, &mut cloned);
+    if validator.has_reserved_name {
+        return Err(CompilerError::Unsupported(
+            "variables starting with '__' are reserved; set allow_double_underscore_variables=true to allow them".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -809,6 +854,8 @@ fn compile_contract_impl<'i>(
     options: CompileOptions,
     source: Option<&'i str>,
 ) -> Result<CompiledContract<'i>, CompilerError> {
+    validate_reserved_variable_names(contract, options)?;
+
     if contract.functions.is_empty() {
         return Err(CompilerError::Unsupported("contract has no functions".to_string()));
     }

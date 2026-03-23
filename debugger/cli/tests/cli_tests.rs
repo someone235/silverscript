@@ -1,6 +1,186 @@
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use kaspa_consensus_core::Hash;
+use kaspa_consensus_core::hashing::sighash::SigHashReusedValuesUnsync;
+use kaspa_consensus_core::hashing::sighash::calc_schnorr_signature_hash;
+use kaspa_consensus_core::hashing::sighash_type::SIG_HASH_ALL;
+use kaspa_consensus_core::tx::{
+    CovenantBinding, MutableTransaction, Transaction, TransactionId, TransactionInput, TransactionOutpoint, TransactionOutput,
+    TxInputMass, UtxoEntry,
+};
+use kaspa_txscript::{pay_to_script_hash_script, pay_to_script_hash_signature_script};
+use secp256k1::{Keypair, Secp256k1, SecretKey};
+use silverscript_lang::ast::{Expr, format_contract_ast};
+use silverscript_lang::compiler::{CompileOptions, CovenantDeclCallOptions, compile_contract, struct_object};
+
+const COV_A: Hash = Hash::from_bytes(*b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut out, "{byte:02x}").expect("write to string");
+    }
+    out
+}
+
+fn compile_dog20_state<'a>(source: &'a str, owner: Vec<u8>, amount: i64) -> silverscript_lang::compiler::CompiledContract<'a> {
+    compile_contract(
+        source,
+        &[Expr::bytes(owner), Expr::int(amount), Expr::byte(0), Expr::bool(false), Expr::int(2), Expr::int(2)],
+        CompileOptions::default(),
+    )
+    .expect("compile dog20 state")
+}
+
+fn sign_tx_input(tx: Transaction, entries: Vec<UtxoEntry>, input_idx: usize, keypair: &Keypair) -> Vec<u8> {
+    let tx = MutableTransaction::with_entries(tx, entries);
+    let reused_values = SigHashReusedValuesUnsync::new();
+    let sig_hash = calc_schnorr_signature_hash(&tx.as_verifiable(), input_idx, SIG_HASH_ALL, &reused_values);
+    let msg = secp256k1::Message::from_digest_slice(sig_hash.as_bytes().as_slice()).expect("valid sighash message");
+    let sig = keypair.sign_schnorr(msg);
+    let mut signature = sig.as_ref().to_vec();
+    signature.push(SIG_HASH_ALL.to_u8());
+    signature
+}
+
+fn build_dog20_handoff_fixture_content() -> (String, String) {
+    let source =
+        std::fs::read_to_string("/home/ori/silverscript/silverscript-lang/tests/examples/dog20.sil").expect("read dog20 source");
+
+    let secp = Secp256k1::new();
+    let genesis_secret = SecretKey::from_slice(&[1u8; 32]).expect("valid genesis secret key");
+    let handoff_secret = SecretKey::from_slice(&[2u8; 32]).expect("valid handoff secret key");
+    let genesis_owner = Keypair::from_secret_key(&secp, &genesis_secret);
+    let handoff_owner = Keypair::from_secret_key(&secp, &handoff_secret);
+
+    let genesis_owner_bytes = genesis_owner.x_only_public_key().0.serialize().to_vec();
+    let handoff_owner_bytes = handoff_owner.x_only_public_key().0.serialize().to_vec();
+
+    let genesis = compile_dog20_state(&source, genesis_owner_bytes.clone(), 1_000);
+    let handoff = compile_dog20_state(&source, handoff_owner_bytes.clone(), 1_000);
+    let lowered_source = format_contract_ast(&genesis.ast);
+
+    let handoff_outputs = vec![TransactionOutput {
+        value: 1_000,
+        script_public_key: pay_to_script_hash_script(&handoff.script),
+        covenant: Some(CovenantBinding { authorizing_input: 0, covenant_id: COV_A }),
+    }];
+
+    let handoff_entries = vec![UtxoEntry::new(1_000, pay_to_script_hash_script(&genesis.script), 0, false, Some(COV_A))];
+    let handoff_unsigned_tx = Transaction::new(
+        1,
+        vec![TransactionInput {
+            previous_outpoint: TransactionOutpoint { transaction_id: TransactionId::from_bytes([1u8; 32]), index: 0 },
+            signature_script: vec![],
+            sequence: 0,
+                    mass: TxInputMass::ComputeMass(0),
+        }],
+        handoff_outputs.clone(),
+        0,
+        Default::default(),
+        0,
+        vec![],
+    );
+
+    let handoff_sig = sign_tx_input(handoff_unsigned_tx, handoff_entries, 0, &genesis_owner);
+    let handoff_action_script = genesis
+        .build_sig_script_for_covenant_decl(
+            "transfer",
+            vec![
+                vec![struct_object(vec![
+                    ("ownerIdentifier", Expr::bytes(handoff_owner_bytes.clone())),
+                    ("identifierType", Expr::byte(0)),
+                    ("amount", Expr::int(1_000)),
+                    ("isMinter", Expr::bool(false)),
+                ])]
+                .into(),
+                vec![Expr::bytes(handoff_sig)].into(),
+                Expr::bytes(vec![]),
+            ],
+            CovenantDeclCallOptions { is_leader: true },
+        )
+        .expect("build handoff leader action script");
+    let handoff_sigscript =
+        pay_to_script_hash_signature_script(genesis.script.clone(), handoff_action_script).expect("build p2sh handoff sigscript");
+
+    let handoff_sigscript_hex = hex_encode(&handoff_sigscript);
+    let cov_a_hex = hex_encode(&COV_A.as_bytes());
+    let prev_txid_hex = hex_encode(&[1u8; 32]);
+
+    let test_file = format!(
+        r#"{{
+    "tests": [
+        {{
+            "name": "dog20_handoff_until_line_803",
+            "function": "__delegate_transfer",
+            "constructor_args": [
+                "0x{genesis_owner_hex}",
+                1000,
+                0,
+                false,
+                2,
+                2
+            ],
+            "args": [],
+            "expect": "fail",
+            "tx": {{
+                "version": 1,
+                "lock_time": 0,
+                "active_input_index": 0,
+                "inputs": [
+                    {{
+                        "prev_txid": "0x{prev_txid_hex}",
+                        "prev_index": 0,
+                        "sequence": 0,
+                        "sig_op_count": 100,
+                        "utxo_value": 1000,
+                        "covenant_id": "0x{cov_a_hex}",
+                        "signature_script_hex": "0x{handoff_sigscript_hex}"
+                    }}
+                ],
+                "outputs": [
+                    {{
+                        "value": 1000,
+                        "covenant_id": "0x{cov_a_hex}",
+                        "authorizing_input": 0,
+                        "constructor_args": [
+                            "0x{handoff_owner_hex}",
+                            1000,
+                            0,
+                              false,
+                              2,
+                              2
+                        ]
+                    }}
+                ]
+            }}
+        }}
+    ]
+}}
+"#,
+        genesis_owner_hex = hex_encode(&genesis_owner_bytes),
+        handoff_owner_hex = hex_encode(&handoff_owner_bytes),
+        handoff_sigscript_hex = handoff_sigscript_hex,
+        cov_a_hex = cov_a_hex,
+        prev_txid_hex = prev_txid_hex,
+    );
+
+    (lowered_source, test_file)
+}
+
+fn write_dog20_handoff_fixture_to(dir: &Path) -> (PathBuf, PathBuf) {
+    std::fs::create_dir_all(dir).expect("create dog20 fixture dir");
+    let script_path = dir.join("dog20.sil");
+    let test_file_path = dir.join("dog20.test.json");
+    let (source, test_file) = build_dog20_handoff_fixture_content();
+    std::fs::write(&script_path, source).expect("write dog20 fixture script");
+    std::fs::write(&test_file_path, test_file).expect("write dog20 test file");
+    (script_path, test_file_path)
+}
 
 fn write_test_fixture() -> (std::path::PathBuf, std::path::PathBuf) {
     write_named_test_fixture("simple.sil", "simple.test.json")
@@ -748,4 +928,37 @@ fn cli_debugger_test_name_requires_script_path_or_test_file() {
     assert!(!output.status.success(), "expected failure when neither script path nor test file is provided");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("--test-name requires --test-file or SCRIPT_PATH"), "unexpected stderr: {stderr}");
+}
+
+#[test]
+fn writes_dog20_debug_test_fixtures_directory() {
+    let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dog20-debug-test-fixtures");
+    let (script_path, test_file_path) = write_dog20_handoff_fixture_to(&fixtures_dir);
+    assert!(script_path.exists(), "missing generated script fixture at {}", script_path.display());
+    assert!(test_file_path.exists(), "missing generated test fixture at {}", test_file_path.display());
+}
+
+#[test]
+fn cli_debugger_allows_double_underscore_variables_for_dog20_fixture() {
+    let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dog20-debug-test-fixtures");
+    let (_script_path, test_file_path) = write_dog20_handoff_fixture_to(&fixtures_dir);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cli-debugger"))
+        .arg("--run")
+        .arg("--allow-double-underscore-variables")
+        .arg("--test-file")
+        .arg(&test_file_path)
+        .arg("--test-name")
+        .arg("dog20_handoff_until_line_803")
+        .output()
+        .expect("run cli-debugger dog20 fixture test");
+
+    assert!(
+        output.status.success(),
+        "expected success, status={:?}, stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("PASS (expected failure)"), "expected expected-failure PASS marker in stdout, got: {stdout}");
 }
