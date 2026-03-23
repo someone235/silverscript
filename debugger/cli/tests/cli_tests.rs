@@ -98,7 +98,7 @@ fn build_dog20_handoff_fixture_content() -> (String, String) {
                     ("isMinter", Expr::bool(false)),
                 ])]
                 .into(),
-                vec![Expr::bytes(handoff_sig)].into(),
+                vec![Expr::bytes(handoff_sig.clone())].into(),
                 Expr::bytes(vec![]),
             ],
             CovenantDeclCallOptions { is_leader: true },
@@ -116,7 +116,7 @@ fn build_dog20_handoff_fixture_content() -> (String, String) {
     "tests": [
         {{
             "name": "dog20_handoff_until_line_803",
-            "function": "__delegate_transfer",
+            "function": "__leader_transfer",
             "constructor_args": [
                 "0x{genesis_owner_hex}",
                 1000,
@@ -125,8 +125,21 @@ fn build_dog20_handoff_fixture_content() -> (String, String) {
                 2,
                 2
             ],
-            "args": [],
-            "expect": "fail",
+            "args": [
+                [
+                    {{
+                        "ownerIdentifier": "0x{handoff_owner_hex}",
+                        "identifierType": 0,
+                        "amount": 1000,
+                        "isMinter": false
+                    }}
+                ],
+                [
+                    "0x{handoff_sig_hex}"
+                ],
+                "0x"
+            ],
+            "expect": "pass",
             "tx": {{
                 "version": 1,
                 "lock_time": 0,
@@ -164,6 +177,7 @@ fn build_dog20_handoff_fixture_content() -> (String, String) {
 "#,
         genesis_owner_hex = hex_encode(&genesis_owner_bytes),
         handoff_owner_hex = hex_encode(&handoff_owner_bytes),
+        handoff_sig_hex = hex_encode(&handoff_sig),
         handoff_sigscript_hex = handoff_sigscript_hex,
         cov_a_hex = cov_a_hex,
         prev_txid_hex = prev_txid_hex,
