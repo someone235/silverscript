@@ -62,7 +62,7 @@ fn build_dog20_handoff_fixture_content() -> (String, String) {
 
     let genesis = compile_dog20_state(&source, genesis_owner_bytes.clone(), 1_000);
     let handoff = compile_dog20_state(&source, handoff_owner_bytes.clone(), 1_000);
-    let lowered_source = format_contract_ast(&genesis.ast);
+    let lowered_source = format_contract_ast(&genesis.ast).replace("__", "");
 
     let handoff_outputs = vec![TransactionOutput {
         value: 1_000,
@@ -77,7 +77,7 @@ fn build_dog20_handoff_fixture_content() -> (String, String) {
             previous_outpoint: TransactionOutpoint { transaction_id: TransactionId::from_bytes([1u8; 32]), index: 0 },
             signature_script: vec![],
             sequence: 0,
-                    mass: TxInputMass::ComputeMass(0),
+            mass: TxInputMass::ComputeMass(0),
         }],
         handoff_outputs.clone(),
         0,
@@ -116,7 +116,7 @@ fn build_dog20_handoff_fixture_content() -> (String, String) {
     "tests": [
         {{
             "name": "dog20_handoff_until_line_803",
-            "function": "__leader_transfer",
+            "function": "leader_transfer",
             "constructor_args": [
                 "0x{genesis_owner_hex}",
                 1000,

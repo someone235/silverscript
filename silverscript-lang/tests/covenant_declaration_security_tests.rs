@@ -797,7 +797,7 @@ fn reproduce_bug() {
         int cov_in_count = OpCovInputCount(cov_id);
         int cov_out_count = OpCovOutputCount(cov_id);
         State in_state = readInputState(OpCovInputIdx(cov_id, 0));
-        require(in_state.identifierType == 0);
+        require(in_state.identifierType == 0x00);
     }
 }
 
@@ -883,7 +883,7 @@ fn dog20_can_split_then_merge_tokens_with_two_way_fanout() {
         vec![],
     );
 
-    execute_input_with_covenants(handoff_tx.clone(), handoff_entries, 0).expect("Dog20 handoff should succeed");
+    execute_input_with_covenants_with_trace_log(handoff_tx.clone(), handoff_entries, 0).expect("Dog20 handoff should succeed");
 
     let split_outputs = vec![
         TransactionOutput {
