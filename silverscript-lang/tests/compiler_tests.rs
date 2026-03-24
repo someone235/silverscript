@@ -2449,8 +2449,6 @@ fn compiles_int_array_index_to_expected_script() {
         .unwrap()
         .add_op(OpSubstr)
         .unwrap()
-        .add_op(OpBin2Num)
-        .unwrap()
         .add_i64(7)
         .unwrap()
         .add_op(OpNumEqual)
