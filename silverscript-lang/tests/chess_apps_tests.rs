@@ -4,9 +4,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use blake2b_simd::Params as Blake2bParams;
+use kaspa_consensus_core::config::params::MAINNET_PARAMS;
 use kaspa_consensus_core::Hash;
 use kaspa_consensus_core::hashing::sighash::{SigHashReusedValuesUnsync, calc_schnorr_signature_hash};
 use kaspa_consensus_core::hashing::sighash_type::SIG_HASH_ALL;
+use kaspa_consensus_core::mass::{ComputeBudget, Gram, MassCalculator, ScriptUnits};
 use kaspa_consensus_core::tx::{
     CovenantBinding, PopulatedTransaction, Transaction, TransactionId, TransactionInput, TransactionOutpoint, TransactionOutput,
     UtxoEntry, VerifiableTransaction,
@@ -442,11 +444,12 @@ fn entry_sigscript(compiled: &CompiledContract<'_>, function: &str, args: Vec<Ex
 }
 
 fn tx_input(index: u32, signature_script: Vec<u8>, sig_op_count: u8) -> TransactionInput {
+    let _ = sig_op_count;
     TransactionInput {
         previous_outpoint: TransactionOutpoint { transaction_id: TransactionId::from_bytes([index as u8 + 1; 32]), index },
         signature_script,
         sequence: 0,
-        sig_op_count,
+        mass: ComputeBudget(0).into(),
     }
 }
 
@@ -475,10 +478,45 @@ fn covenant_utxo(compiled: &CompiledContract<'_>, covenant_id: Hash) -> UtxoEntr
     covenant_utxo_with_value(compiled, covenant_id, 1_000)
 }
 
-fn execute_input_with_covenants(tx: Transaction, entries: Vec<UtxoEntry>, input_idx: usize) -> Result<(), TxScriptError> {
+fn print_tx_compute_mass(label: &str, tx: &Transaction, entries: &[UtxoEntry]) {
+    let mass_calculator = MassCalculator::new_with_consensus_params(&MAINNET_PARAMS);
     let reused_values = SigHashReusedValuesUnsync::new();
     let sig_cache = Cache::new(10_000);
+    let flags = EngineFlags { covenants_enabled: true, sigop_script_units: Gram(1000).to_script_units().value() };
+    let populated = PopulatedTransaction::new(tx, entries.to_vec());
+    let cov_ctx = CovenantsContext::from_tx(&populated).expect("covenants context builds for chess tx");
+    let mut budgeted_tx = tx.clone();
+    let mut compute_budgets = Vec::with_capacity(tx.inputs.len());
+
+    for (input_idx, input) in tx.inputs.iter().enumerate() {
+        let utxo = populated.utxo(input_idx).expect("selected input utxo");
+        let mut vm = TxScriptEngine::from_transaction_input_with_allowed_script_units(
+            &populated,
+            input,
+            input_idx,
+            utxo,
+            EngineCtx::new(&sig_cache).with_reused(&reused_values).with_covenants_ctx(&cov_ctx),
+            flags,
+            u64::MAX,
+        );
+        vm.execute().unwrap_or_else(|err| panic!("failed to measure script units for {label} input #{input_idx}: {err}"));
+        let required_units = ScriptUnits(vm.used_script_units());
+        let compute_budget = ComputeBudget::checked_covering_script_units(required_units)
+            .unwrap_or_else(|| panic!("required compute budget does not fit for {label} input #{input_idx}"));
+        budgeted_tx.inputs[input_idx].mass = compute_budget.into();
+        compute_budgets.push(compute_budget.value());
+    }
+
+    let compute_mass = mass_calculator.calc_non_contextual_masses(&budgeted_tx).compute_mass;
+    println!("{label}: compute budgets = {compute_budgets:?}, tx compute mass = {compute_mass}");
+}
+
+fn execute_input_with_covenants(label: &str, tx: Transaction, entries: Vec<UtxoEntry>, input_idx: usize) -> Result<(), TxScriptError> {
+    let reused_values = SigHashReusedValuesUnsync::new();
+    let sig_cache = Cache::new(10_000);
+    let flags = EngineFlags { covenants_enabled: true, sigop_script_units: Gram(1000).to_script_units().value() };
     let input = tx.inputs[input_idx].clone();
+    print_tx_compute_mass(label, &tx, &entries);
     let populated = PopulatedTransaction::new(&tx, entries);
     let cov_ctx = CovenantsContext::from_tx(&populated).map_err(TxScriptError::from)?;
     let utxo = populated.utxo(input_idx).expect("selected input utxo");
@@ -488,7 +526,7 @@ fn execute_input_with_covenants(tx: Transaction, entries: Vec<UtxoEntry>, input_
         input_idx,
         utxo,
         EngineCtx::new(&sig_cache).with_reused(&reused_values).with_covenants_ctx(&cov_ctx),
-        EngineFlags { covenants_enabled: true },
+        flags,
     );
     vm.execute()
 }
@@ -555,7 +593,7 @@ fn run_route(
             Expr::bytes(target.suffix.clone()),
         ],
     );
-    let result = execute_input_with_covenants(tx, entries, 0);
+    let result = execute_input_with_covenants("route", tx, entries, 0);
     assert!(result.is_ok(), "route should succeed: {:?}", result.unwrap_err());
 }
 
@@ -570,7 +608,7 @@ fn run_worker_apply(
     let outputs = vec![covenant_output(next, 0, covenant_id)];
     let entries = vec![covenant_utxo(active, covenant_id)];
     let tx = Transaction::new(1, vec![tx_input(0, sigscript, 0)], outputs, 0, Default::default(), 0, vec![]);
-    let result = execute_input_with_covenants(tx, entries, 0);
+    let result = execute_input_with_covenants(label, tx, entries, 0);
     assert!(result.is_ok(), "{label} worker apply should succeed: {:?}", result.unwrap_err());
 }
 
@@ -585,7 +623,7 @@ fn run_prep_apply(
     let outputs = vec![covenant_output(next, 0, covenant_id)];
     let entries = vec![covenant_utxo(active, covenant_id)];
     let tx = Transaction::new(1, vec![tx_input(0, sigscript, 0)], outputs, 0, Default::default(), 0, vec![]);
-    let result = execute_input_with_covenants(tx, entries, 0);
+    let result = execute_input_with_covenants(label, tx, entries, 0);
     assert!(result.is_ok(), "{label} prep apply should succeed: {:?}", result.unwrap_err());
 }
 
@@ -881,7 +919,7 @@ fn league_register_player_runtime_matches_expected_output_state() {
         previous_outpoint: TransactionOutpoint { transaction_id: TransactionId::from_bytes([0xabu8; 32]), index: 7 },
         signature_script: vec![],
         sequence: 0,
-        sig_op_count: 1,
+        mass: ComputeBudget(0).into(),
     };
 
     let player_id = blake2b_bytes(&[player_id_domain.as_slice(), &[0xabu8; 32], &7u32.to_le_bytes()].concat());
@@ -926,7 +964,7 @@ fn league_register_player_runtime_matches_expected_output_state() {
         vec![Expr::bytes(sig), Expr::bytes(owner.pubkey_bytes), Expr::bytes(player_prefix), Expr::bytes(player_suffix)],
     );
 
-    let result = execute_input_with_covenants(tx, entries, 0);
+    let result = execute_input_with_covenants("league_register_player", tx, entries, 0);
     assert!(result.is_ok(), "league register_player runtime failed: {}", result.unwrap_err());
 }
 
@@ -1130,10 +1168,10 @@ fn player_start_game_runtime_matches_expected_output_states() {
         ],
     );
 
-    let leader_result = execute_input_with_covenants(tx.clone(), entries.clone(), 0);
+    let leader_result = execute_input_with_covenants("player_start_game_leader", tx.clone(), entries.clone(), 0);
     assert!(leader_result.is_ok(), "player start_game leader runtime failed: {}", leader_result.unwrap_err());
 
-    let delegate_result = execute_input_with_covenants(tx, entries, 1);
+    let delegate_result = execute_input_with_covenants("player_start_game_delegate", tx, entries, 1);
     assert!(delegate_result.is_ok(), "player delegate_start_game runtime failed: {}", delegate_result.unwrap_err());
 }
 
@@ -1754,12 +1792,12 @@ fn settle_runtime_matches_expected_output_states() {
         vec![],
     );
 
-    let leader_result = execute_input_with_covenants(tx.clone(), entries.clone(), 0);
+    let leader_result = execute_input_with_covenants("settle_leader", tx.clone(), entries.clone(), 0);
     assert!(leader_result.is_ok(), "settle leader runtime failed: {}", leader_result.unwrap_err());
 
-    let white_delegate_result = execute_input_with_covenants(tx.clone(), entries.clone(), 1);
+    let white_delegate_result = execute_input_with_covenants("settle_white_delegate", tx.clone(), entries.clone(), 1);
     assert!(white_delegate_result.is_ok(), "white delegate_settle runtime failed: {}", white_delegate_result.unwrap_err());
 
-    let black_delegate_result = execute_input_with_covenants(tx, entries, 2);
+    let black_delegate_result = execute_input_with_covenants("settle_black_delegate", tx, entries, 2);
     assert!(black_delegate_result.is_ok(), "black delegate_settle runtime failed: {}", black_delegate_result.unwrap_err());
 }
