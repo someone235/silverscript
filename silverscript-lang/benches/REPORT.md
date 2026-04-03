@@ -4,7 +4,7 @@ This report summarizes the results produced by [`script_validation.rs`](./script
 
 ## Setup
 
-Two block-shaped workloads were benchmarked under the `500,000` compute-mass block limit:
+Four block-shaped workloads were benchmarked under the `500,000` compute-mass block limit:
 
 - `chess_mix`
   - A repeated cycle of real chess-app transactions built from the silverscript test fixtures:
@@ -15,6 +15,13 @@ Two block-shaped workloads were benchmarked under the `500,000` compute-mass blo
     - `settle`
 - `schnorr_2in1`
   - Repeated ordinary v0 2-input / 1-output schnorr transactions
+- `op_dup_243`
+  - Repeated 1-input / 0-output transactions spending UTXOs whose script pub key is `1` followed by `243` `OP_DUP`s
+  - Benchmarked with `covenants_enabled = true`
+- `op_dup_one_tx`
+  - One 1-input / 0-output transaction spending a UTXO whose script pub key starts with `1`, then `243` `OP_DUP`s, then repeated `OP_DROP OP_DUP`
+  - Growth stops at the last script that still executes under txscript's opcode limit
+  - Benchmarked with `covenants_enabled = true`
 
 Validation modes:
 
@@ -44,20 +51,30 @@ Packed blocks:
   - `182` txs
   - `364` inputs
   - `499,044` compute mass
+- `op_dup_243`
+  - `3378` txs
+  - `3378` inputs
+  - `499,944` compute mass
+- `op_dup_one_tx`
+  - `1` tx
+  - `1` input
+  - `1,148` compute mass
 
 Results:
 
-| Mode | Chess mix | Schnorr 2:1 |
-|---|---:|---:|
-| single-thread | `5.2756 ms` | `8.1014 ms` |
-| rayon 2 | `4.1305 ms` | `5.9937 ms` |
-| rayon 4 | `4.1315 ms` | `7.2356 ms` |
-| rayon 8 | `4.5441 ms` | `8.0068 ms` |
-| rayon 16 | `4.3964 ms` | `8.1052 ms` |
+| Mode | Chess mix | Schnorr 2:1 | OpDup 243 | OpDup One Tx |
+|---|---:|---:|---:|---:|
+| single-thread | `5.1131 ms` | `9.1976 ms` | `33.329 ms` | `407.56 µs` |
+| rayon 2 | `6.9869 ms` | `7.5316 ms` | `61.591 ms` | `481.20 µs` |
+| rayon 4 | `4.9948 ms` | `9.3913 ms` | `75.785 ms` | `437.48 µs` |
+| rayon 8 | `5.6962 ms` | `11.459 ms` | `63.925 ms` | `453.10 µs` |
+| rayon 16 | `5.5362 ms` | `12.209 ms` | `65.919 ms` | `468.41 µs` |
 
 Observation:
 
-- At the current committed pricing, the chess block validates faster than the ordinary schnorr block in every measured mode.
+- `op_dup_243` is by far the slowest equally mass-packed workload in every measured mode.
+- `chess_mix` is faster than `schnorr_2in1` in every measured mode.
+- `op_dup_one_tx` is the fastest in absolute time, but it is not an equally mass-packed block: it only reaches `1,148` compute mass before hitting txscript's opcode limit.
 
 ## Squeezed Pricing
 
@@ -108,6 +125,8 @@ Observation:
 
 ## Summary
 
-- Current committed pricing already allows chess-heavy blocks to validate faster than equally mass-packed ordinary schnorr blocks.
+- Current committed pricing makes the equally mass-packed `op_dup_243` workload dramatically slower than both chess-heavy blocks and ordinary schnorr blocks.
+- Current committed pricing still allows chess-heavy blocks to validate faster than equally mass-packed ordinary schnorr blocks in this run.
+- The `op_dup_one_tx` variant does not approach the block mass limit because txscript's opcode limit stops script growth at `1,148` compute mass.
 - Increasing `SCRIPT_UNITS_PER_GRAM` to `100` fits more chess transactions into the same block mass budget.
 - That squeeze does not make chess slower than schnorr, but it does increase total chess-block validation time by roughly `27%` to `35%` depending on the thread count.

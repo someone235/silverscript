@@ -9,17 +9,17 @@ use criterion::{BenchmarkId, Criterion, SamplingMode, black_box, criterion_group
 use kaspa_addresses::{Address, Prefix, Version};
 use kaspa_consensus_core::Hash;
 use kaspa_consensus_core::config::params::MAINNET_PARAMS;
-use kaspa_consensus_core::hashing::sighash::{
-    SigHashReusedValuesSync, SigHashReusedValuesUnsync, calc_schnorr_signature_hash,
-};
+use kaspa_consensus_core::hashing::sighash::{SigHashReusedValuesSync, SigHashReusedValuesUnsync, calc_schnorr_signature_hash};
 use kaspa_consensus_core::hashing::sighash_type::SIG_HASH_ALL;
 use kaspa_consensus_core::mass::{ComputeBudget, Gram, MassCalculator, ScriptUnits, free_script_units_per_input};
 use kaspa_consensus_core::tx::{
-    CovenantBinding, MutableTransaction, PopulatedTransaction, Transaction, TransactionId, TransactionInput, TransactionOutpoint,
-    TransactionOutput, TxInputMass, UtxoEntry, VerifiableTransaction,
+    CovenantBinding, MutableTransaction, PopulatedTransaction, ScriptPublicKey, Transaction, TransactionId, TransactionInput,
+    TransactionOutpoint, TransactionOutput, TxInputMass, UtxoEntry, VerifiableTransaction,
 };
 use kaspa_txscript::caches::Cache;
 use kaspa_txscript::covenants::CovenantsContext;
+use kaspa_txscript::opcodes::codes::{OpDrop, OpDup};
+use kaspa_txscript::script_builder::ScriptBuilder;
 use kaspa_txscript::{
     EngineCtx, EngineFlags, TxScriptEngine, pay_to_address_script, pay_to_script_hash_script, pay_to_script_hash_signature_script,
 };
@@ -530,7 +530,8 @@ fn mass_calculator() -> &'static MassCalculator {
 
 fn prepare_bench_tx(tx: Transaction, entries: Vec<UtxoEntry>, covenants_enabled: bool) -> BenchTx {
     let tx = MutableTransaction::with_entries(tx, entries);
-    let cov_ctx = if covenants_enabled { CovenantsContext::from_tx(&tx.as_verifiable()).expect("covenants ctx") } else { Default::default() };
+    let cov_ctx =
+        if covenants_enabled { CovenantsContext::from_tx(&tx.as_verifiable()).expect("covenants ctx") } else { Default::default() };
     BenchTx { tx, cov_ctx, covenants_enabled }
 }
 
@@ -727,8 +728,12 @@ fn build_league_register_player_tx(nonce: u32) -> (Transaction, Vec<UtxoEntry>) 
     };
 
     let player_id = blake2b_bytes(
-        &[player_id_domain.as_slice(), &league_input.previous_outpoint.transaction_id.as_bytes(), &league_input.previous_outpoint.index.to_le_bytes()]
-            .concat(),
+        &[
+            player_id_domain.as_slice(),
+            &league_input.previous_outpoint.transaction_id.as_bytes(),
+            &league_input.previous_outpoint.index.to_le_bytes(),
+        ]
+        .concat(),
     );
     let registered_player = compile_player_state(
         player_source(),
@@ -1131,12 +1136,7 @@ fn build_settle_tx(nonce: u32) -> (Transaction, Vec<UtxoEntry>) {
     let black_delegate_sigscript = entry_sigscript(
         &black_player,
         "delegate_settle",
-        vec![
-            Expr::int(settle_prefix_len),
-            Expr::int(settle_suffix_len),
-            hash_expr(fix.settle.hash),
-            Expr::bytes(route_templates),
-        ],
+        vec![Expr::int(settle_prefix_len), Expr::int(settle_suffix_len), hash_expr(fix.settle.hash), Expr::bytes(route_templates)],
     );
 
     let outputs = vec![
@@ -1192,8 +1192,18 @@ fn build_schnorr_2in1_tx(nonce: u32) -> (Transaction, Vec<UtxoEntry>) {
     let mut tx = Transaction::new(
         0,
         vec![
-            TransactionInput { previous_outpoint: dummy_out1, signature_script: vec![], sequence: 0, mass: TxInputMass::SigopCount(1.into()) },
-            TransactionInput { previous_outpoint: dummy_out2, signature_script: vec![], sequence: 0, mass: TxInputMass::SigopCount(1.into()) },
+            TransactionInput {
+                previous_outpoint: dummy_out1,
+                signature_script: vec![],
+                sequence: 0,
+                mass: TxInputMass::SigopCount(1.into()),
+            },
+            TransactionInput {
+                previous_outpoint: dummy_out2,
+                signature_script: vec![],
+                sequence: 0,
+                mass: TxInputMass::SigopCount(1.into()),
+            },
         ],
         outputs,
         0,
@@ -1213,15 +1223,111 @@ fn build_schnorr_2in1_tx(nonce: u32) -> (Transaction, Vec<UtxoEntry>) {
     (tx, utxos)
 }
 
+fn build_op_dup_script_public_key() -> ScriptPublicKey {
+    let mut builder = ScriptBuilder::new();
+    builder.add_i64(1).expect("push integer 1");
+    for _ in 0..243 {
+        builder.add_op(OpDup).expect("append OP_DUP");
+    }
+    ScriptPublicKey::new(0, builder.drain().into())
+}
+
+fn try_build_budgeted_single_input_tx(
+    nonce: u32,
+    input_spk: ScriptPublicKey,
+    signature_script: Vec<u8>,
+) -> Result<(Transaction, Vec<UtxoEntry>), String> {
+    let outpoint = input_outpoint(0, nonce);
+
+    let utxos = vec![UtxoEntry::new(20_000, input_spk, 0, false, None)];
+    let mut tx = Transaction::new(
+        1,
+        vec![TransactionInput {
+            previous_outpoint: outpoint,
+            signature_script,
+            sequence: 0,
+            mass: TxInputMass::ComputeBudget(0.into()),
+        }],
+        vec![],
+        0,
+        Default::default(),
+        0,
+        vec![],
+    );
+
+    let reused_values = SigHashReusedValuesUnsync::new();
+    let sig_cache = Cache::new(1);
+    let populated = PopulatedTransaction::new(&tx, utxos.clone());
+    let mut vm = TxScriptEngine::from_transaction_input_with_allowed_script_units(
+        &populated,
+        &tx.inputs[0],
+        0,
+        &utxos[0],
+        EngineCtx::new(&sig_cache).with_reused(&reused_values),
+        bench_flags(true),
+        u64::MAX,
+    );
+    vm.execute().map_err(|err| format!("failed to measure op_dup input #0: {err}"))?;
+    let compute_budget = ComputeBudget::checked_covering_script_units(ScriptUnits(vm.used_script_units()))
+        .ok_or_else(|| "required compute budget does not fit for op_dup input #0".to_string())?;
+    tx.inputs[0].mass = compute_budget.into();
+
+    Ok((tx, utxos))
+}
+
+fn build_budgeted_single_input_tx(nonce: u32, input_spk: ScriptPublicKey, signature_script: Vec<u8>) -> (Transaction, Vec<UtxoEntry>) {
+    try_build_budgeted_single_input_tx(nonce, input_spk, signature_script).unwrap_or_else(|err| panic!("{err}"))
+}
+
+fn build_op_dup_tx(nonce: u32) -> (Transaction, Vec<UtxoEntry>) {
+    build_budgeted_single_input_tx(nonce, build_op_dup_script_public_key(), vec![])
+}
+
+fn build_op_dup_p2sh_tx(nonce: u32) -> (Transaction, Vec<UtxoEntry>) {
+    let redeem_script = build_op_dup_script_public_key();
+    let signature_script =
+        pay_to_script_hash_signature_script(redeem_script.script().to_vec(), vec![]).expect("build p2sh redeeming sigscript");
+    build_budgeted_single_input_tx(nonce, pay_to_script_hash_script(redeem_script.script()), signature_script)
+}
+
+fn build_op_dup_one_tx_script_public_key(nonce: u32) -> ScriptPublicKey {
+    let mut script = ScriptBuilder::new();
+    script.add_i64(1).expect("push integer 1");
+    for _ in 0..243 {
+        script.add_op(OpDup).expect("append OP_DUP");
+    }
+
+    let mut best_script = ScriptPublicKey::new(0, script.drain().into());
+    let mut pair_count = 0usize;
+    loop {
+        // eprintln!("building candidate op_dup_one_tx script with {} OP_DUP/OP_DROP pairs", pair_count + 1);
+        let mut candidate_builder = ScriptBuilder::new();
+        candidate_builder.add_i64(1).expect("push integer 1");
+        for _ in 0..243 {
+            candidate_builder.add_op(OpDup).expect("append OP_DUP");
+        }
+        for _ in 0..pair_count + 1 {
+            candidate_builder.add_op(OpDrop).expect("append OP_DROP");
+            candidate_builder.add_op(OpDup).expect("append OP_DUP");
+        }
+        let candidate_script = ScriptPublicKey::new(0, candidate_builder.drain().into());
+        let Ok((candidate_tx, _)) = try_build_budgeted_single_input_tx(nonce, candidate_script.clone(), vec![]) else {
+            break;
+        };
+        if compute_mass(&candidate_tx) > BLOCK_COMPUTE_MASS_LIMIT {
+            break;
+        }
+        best_script = candidate_script;
+        pair_count += 20;
+    }
+
+    best_script
+}
+
 fn build_chess_mix_block() -> BenchBlock {
     type Builder = fn(u32) -> (Transaction, Vec<UtxoEntry>);
-    let builders: [Builder; 5] = [
-        build_pawn_apply_tx,
-        build_route_tx,
-        build_league_register_player_tx,
-        build_player_start_game_tx,
-        build_settle_tx,
-    ];
+    let builders: [Builder; 5] =
+        [build_pawn_apply_tx, build_route_tx, build_league_register_player_tx, build_player_start_game_tx, build_settle_tx];
 
     let mut txs = Vec::new();
     let mut total_mass = 0u64;
@@ -1259,16 +1365,75 @@ fn build_schnorr_block() -> BenchBlock {
         }
         total_inputs += tx.inputs.len();
         total_mass += tx_mass;
-        txs.push(prepare_bench_tx(tx, entries, false));
+        txs.push(prepare_bench_tx(tx, entries, true));
         nonce = nonce.wrapping_add(1);
     }
     BenchBlock { name: "schnorr_2in1", tx_count: txs.len(), input_count: total_inputs, compute_mass: total_mass, txs }
 }
 
+fn build_op_dup_block() -> BenchBlock {
+    let mut txs = Vec::new();
+    let mut total_mass = 0u64;
+    let mut total_inputs = 0usize;
+    let mut nonce = 0u32;
+    loop {
+        let (tx, entries) = build_op_dup_tx(nonce);
+        let tx_mass = compute_mass(&tx);
+        if total_mass + tx_mass > BLOCK_COMPUTE_MASS_LIMIT {
+            break;
+        }
+        total_inputs += tx.inputs.len();
+        total_mass += tx_mass;
+        txs.push(prepare_bench_tx(tx, entries, true));
+        nonce = nonce.wrapping_add(1);
+    }
+    BenchBlock { name: "op_dup_243", tx_count: txs.len(), input_count: total_inputs, compute_mass: total_mass, txs }
+}
+
+fn build_op_dup_one_tx_block() -> BenchBlock {
+    let nonce = 0u32;
+    let output_spk = build_op_dup_one_tx_script_public_key(nonce);
+    let (tx, entries) = build_budgeted_single_input_tx(nonce, output_spk, vec![]);
+    let tx_mass = compute_mass(&tx);
+    assert!(tx_mass <= BLOCK_COMPUTE_MASS_LIMIT, "op_dup_one_tx mass {tx_mass} exceeds block limit {BLOCK_COMPUTE_MASS_LIMIT}");
+    BenchBlock {
+        name: "op_dup_one_tx",
+        tx_count: 1,
+        input_count: tx.inputs.len(),
+        compute_mass: tx_mass,
+        txs: vec![prepare_bench_tx(tx, entries, true)],
+    }
+}
+
+fn build_op_dup_p2sh_block() -> BenchBlock {
+    let mut txs = Vec::new();
+    let mut total_mass = 0u64;
+    let mut total_inputs = 0usize;
+    let mut nonce = 0u32;
+    loop {
+        let (tx, entries) = build_op_dup_p2sh_tx(nonce);
+        let tx_mass = compute_mass(&tx);
+        if total_mass + tx_mass > BLOCK_COMPUTE_MASS_LIMIT {
+            break;
+        }
+        total_inputs += tx.inputs.len();
+        total_mass += tx_mass;
+        txs.push(prepare_bench_tx(tx, entries, true));
+        nonce = nonce.wrapping_add(1);
+    }
+    BenchBlock { name: "op_dup_243_p2sh", tx_count: txs.len(), input_count: total_inputs, compute_mass: total_mass, txs }
+}
+
 fn bench_blocks() -> &'static Vec<BenchBlock> {
     static BLOCKS: OnceLock<Vec<BenchBlock>> = OnceLock::new();
     BLOCKS.get_or_init(|| {
-        let blocks = vec![build_chess_mix_block(), build_schnorr_block()];
+        let blocks = vec![
+            build_chess_mix_block(),
+            build_schnorr_block(),
+            // build_op_dup_block(),
+            build_op_dup_p2sh_block(),
+            // build_op_dup_one_tx_block(),
+        ];
         for block in &blocks {
             eprintln!(
                 "bench block {}: {} txs, {} inputs, compute mass {}",
