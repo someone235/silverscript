@@ -4,7 +4,7 @@ This report summarizes the results produced by [`script_validation.rs`](./script
 
 ## Setup
 
-Four block-shaped workloads were benchmarked under the `500,000` compute-mass block limit:
+The current benchmark configuration covers five block-shaped workloads under the `500,000` compute-mass block limit:
 
 - `chess_mix`
   - A repeated cycle of real chess-app transactions built from the silverscript test fixtures:
@@ -16,23 +16,23 @@ Four block-shaped workloads were benchmarked under the `500,000` compute-mass bl
 - `schnorr_2in1`
   - Repeated ordinary v0 2-input / 1-output schnorr transactions
 - `op_dup_243`
-  - Repeated 1-input / 0-output transactions spending UTXOs whose script pub key is `1` followed by `243` `OP_DUP`s
+  - Repeated 1-input / 0-output transactions whose script path executes `243` `OP_DUP`s directly
+- `op_dup_243_p2sh`
+  - Repeated 1-input / 0-output transactions spending P2SH UTXOs whose redeem script is `1` followed by `243` `OP_DUP`s
   - Benchmarked with `covenants_enabled = true`
 - `op_dup_one_tx`
-  - One 1-input / 0-output transaction spending a UTXO whose script pub key starts with `1`, then `243` `OP_DUP`s, then repeated `OP_DROP OP_DUP`
-  - Growth stops at the last script that still executes under txscript's opcode limit
-  - Benchmarked with `covenants_enabled = true`
+  - Single-transaction workload used as a low-parallelism control case
 
 Validation modes:
 
 - single-threaded sequential execution
-- rayon per-input parallel execution with:
+- rayon execution that parallelizes both transactions and inputs with:
   - `2` threads
   - `4` threads
   - `8` threads
   - `16` threads
 
-The parallel execution model mirrors the per-input rayon shape used by rusty-kaspa transaction validation.
+The parallel execution model now exposes both transaction-level and input-level work to rayon.
 
 ## Current Committed Pricing
 
@@ -55,26 +55,64 @@ Packed blocks:
   - `3378` txs
   - `3378` inputs
   - `499,944` compute mass
+- `op_dup_243_p2sh`
+  - `1269` txs
+  - `1269` inputs
+  - `499,986` compute mass
 - `op_dup_one_tx`
   - `1` tx
   - `1` input
-  - `1,148` compute mass
+  - `10,148` compute mass
 
 Results:
 
-| Mode | Chess mix | Schnorr 2:1 | OpDup 243 | OpDup One Tx |
-|---|---:|---:|---:|---:|
-| single-thread | `5.1131 ms` | `9.1976 ms` | `33.329 ms` | `407.56 µs` |
-| rayon 2 | `6.9869 ms` | `7.5316 ms` | `61.591 ms` | `481.20 µs` |
-| rayon 4 | `4.9948 ms` | `9.3913 ms` | `75.785 ms` | `437.48 µs` |
-| rayon 8 | `5.6962 ms` | `11.459 ms` | `63.925 ms` | `453.10 µs` |
-| rayon 16 | `5.5362 ms` | `12.209 ms` | `65.919 ms` | `468.41 µs` |
+| Mode | Chess mix | Schnorr 2:1 | OpDup 243 | OpDup 243 P2SH | OpDup one tx |
+|---|---:|---:|---:|---:|---:|
+| single-thread | `4.8966 ms` | `9.2447 ms` | `19.893 ms` | `7.6275 ms` | `3.4308 ms` |
+| rayon 2 | `3.0924 ms` | `5.7065 ms` | `18.440 ms` | `7.2740 ms` | `3.5274 ms` |
+| rayon 4 | `1.9060 ms` | `3.8327 ms` | `16.535 ms` | `6.3804 ms` | `3.5653 ms` |
+| rayon 8 | `1.4038 ms` | `3.2152 ms` | `17.626 ms` | `6.0023 ms` | `3.5212 ms` |
+| rayon 16 | `1.1011 ms` | `2.5905 ms` | `13.454 ms` | `5.9995 ms` | `3.5215 ms` |
 
 Observation:
 
-- `op_dup_243` is by far the slowest equally mass-packed workload in every measured mode.
-- `chess_mix` is faster than `schnorr_2in1` in every measured mode.
-- `op_dup_one_tx` is the fastest in absolute time, but it is not an equally mass-packed block: it only reaches `1,148` compute mass before hitting txscript's opcode limit.
+- `chess_mix` remains the fastest workload in every measured mode.
+- `schnorr_2in1` is consistently faster than both op-dup block-filling workloads, but slower than `chess_mix`.
+- `op_dup_243` remains slower than `op_dup_243_p2sh` in every measured mode.
+- `op_dup_one_tx` improves versus the previous baseline in every mode, but because it contains only one transaction and one input, rayon provides no meaningful additional speedup over single-threaded execution.
+
+Observed criterion change output versus the previous committed benchmark baseline:
+
+- `chess_mix`
+  - single-thread: regressed by `+1.9954%` to `+2.3179%`
+  - rayon 2: improved by `-3.7505%` to `-1.8767%`
+  - rayon 4: improved by `-5.3232%` to `-3.2813%`
+  - rayon 8: no significant change
+  - rayon 16: change within noise threshold, with point estimate `-2.2641%`
+- `schnorr_2in1`
+  - single-thread: regressed by `+1.3695%` to `+3.6818%`
+  - rayon 2: improved by `-3.4989%` to `-2.3707%`
+  - rayon 4: no significant change
+  - rayon 8: improved by `-7.3532%` to `-5.4045%`
+  - rayon 16: regressed by `+1.0978%` to `+2.7281%`
+- `op_dup_243`
+  - single-thread: regressed by `+9.0855%` to `+13.501%`
+  - rayon 2: regressed by `+7.6848%` to `+9.4003%`
+  - rayon 4: regressed by `+37.234%` to `+39.487%`
+  - rayon 8: regressed by `+24.874%` to `+26.732%`
+  - rayon 16: improved by `-10.214%` to `-9.0384%`
+- `op_dup_243_p2sh`
+  - single-thread: improved by `-35.245%` to `-34.697%`
+  - rayon 2: improved by `-24.616%` to `-23.599%`
+  - rayon 4: improved by `-11.957%` to `-10.982%`
+  - rayon 8: improved by `-15.529%` to `-13.222%`
+  - rayon 16: improved by `-8.0084%` to `-5.4867%`
+- `op_dup_one_tx`
+  - single-thread: improved by `-17.944%` to `-15.588%`
+  - rayon 2: improved by `-22.257%` to `-20.537%`
+  - rayon 4: improved by `-20.614%` to `-18.392%`
+  - rayon 8: improved by `-18.605%` to `-16.932%`
+  - rayon 16: improved by `-22.464%` to `-20.741%`
 
 ## Squeezed Pricing
 
@@ -125,8 +163,8 @@ Observation:
 
 ## Summary
 
-- Current committed pricing makes the equally mass-packed `op_dup_243` workload dramatically slower than both chess-heavy blocks and ordinary schnorr blocks.
-- Current committed pricing still allows chess-heavy blocks to validate faster than equally mass-packed ordinary schnorr blocks in this run.
-- The `op_dup_one_tx` variant does not approach the block mass limit because txscript's opcode limit stops script growth at `1,148` compute mass.
+- With rayon parallelizing both transactions and inputs, the chess-heavy block still validates substantially faster than the equally mass-packed schnorr and op-dup blocks.
+- In this configuration, direct `op_dup_243` is the slowest block-filling workload in every measured mode, and `op_dup_243_p2sh` is consistently faster than direct `op_dup_243`.
+- The latest run is mixed rather than uniformly better or worse: chess and schnorr improve in some rayon modes while regressing slightly in single-threaded mode, direct `op_dup_243` regresses sharply except at `16` threads, and `op_dup_243_p2sh` plus `op_dup_one_tx` improve across all reported modes.
 - Increasing `SCRIPT_UNITS_PER_GRAM` to `100` fits more chess transactions into the same block mass budget.
 - That squeeze does not make chess slower than schnorr, but it does increase total chess-block validation time by roughly `27%` to `35%` depending on the thread count.

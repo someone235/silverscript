@@ -1430,9 +1430,9 @@ fn bench_blocks() -> &'static Vec<BenchBlock> {
         let blocks = vec![
             build_chess_mix_block(),
             build_schnorr_block(),
-            // build_op_dup_block(),
+            build_op_dup_block(),
             build_op_dup_p2sh_block(),
-            // build_op_dup_one_tx_block(),
+            build_op_dup_one_tx_block(),
         ];
         for block in &blocks {
             eprintln!(
@@ -1478,12 +1478,13 @@ fn validate_block_sequential(block: &BenchBlock) {
 
 fn validate_block_parallel(block: &BenchBlock, pool: &rayon::ThreadPool) {
     let cache = Cache::new(block.input_count as u64);
-    for bench_tx in &block.txs {
-        let verifiable = bench_tx.tx.as_verifiable();
-        let reused_values = SigHashReusedValuesSync::new();
-        let ctx = EngineCtx::new(&cache).with_reused(&reused_values).with_covenants_ctx(&bench_tx.cov_ctx);
-        let flags = bench_flags(bench_tx.covenants_enabled);
-        pool.install(|| {
+    pool.install(|| {
+        block.txs.par_iter().try_for_each(|bench_tx| {
+            let verifiable = bench_tx.tx.as_verifiable();
+            let reused_values = SigHashReusedValuesSync::new();
+            let ctx = EngineCtx::new(&cache).with_reused(&reused_values).with_covenants_ctx(&bench_tx.cov_ctx);
+            let flags = bench_flags(bench_tx.covenants_enabled);
+
             (0..verifiable.inputs().len()).into_par_iter().try_for_each(|input_idx| {
                 let (input, utxo) = verifiable.populated_input(input_idx);
                 let allowed_script_units = input_allowed_script_units(input, flags);
@@ -1499,8 +1500,8 @@ fn validate_block_parallel(block: &BenchBlock, pool: &rayon::ThreadPool) {
                 vm.execute()
             })
         })
-        .unwrap();
-    }
+    })
+    .unwrap();
 }
 
 fn benchmark_script_validation(c: &mut Criterion) {
