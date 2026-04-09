@@ -8963,3 +8963,29 @@ contract StructCounterLoop(int BOUND) {
     assert!(d2 <= d1 * 2, "unexpected superlinear growth: lens={lens:?} d1={d1} d2={d2}");
     assert!(lens[2] < 10_000, "unexpected script size: lens={lens:?}");
 }
+
+#[test]
+fn dog20_minter_regresses_on_calc_in_amount_helper_lookup() {
+    let source = include_str!("examples/dog20-minter.sil");
+    let result = compile_contract(
+        source,
+        &[
+            Expr::bytes(vec![1u8; 32]),
+            Expr::bytes(vec![2u8; 32]),
+            Expr::int(1_000),
+            Expr::bool(false),
+            Expr::int(1),
+            Expr::int(1),
+            Expr::bytes(vec![3u8; 32]),
+            Expr::bytes(vec![0x51]),
+            Expr::bytes(vec![0x52]),
+        ],
+        CompileOptions::default(),
+    );
+
+    let err = result.expect_err("dog20-minter.sil should currently fail to compile");
+    assert!(
+        err.to_string().contains("unknown function call: calcInAmount"),
+        "expected calcInAmount helper lookup regression, got: {err:?}"
+    );
+}
